@@ -1,0 +1,16 @@
+# Dependencies and generated output
+node_modules/
+dist/
+build/
+coverage/
+.vercel/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
