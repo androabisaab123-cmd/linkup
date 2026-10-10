@@ -9,19 +9,25 @@ const skillLabels = ['New to it', 'Beginner', 'Getting comfortable', 'Confident'
 const state = {
   session: null, user: null, profile: null, gender: '', selfGender: '', isAdmin: false,
   page: 'discover', authMode: 'signup', theme: localStorage.getItem('linkup-secure-theme') || 'system',
-  events: [], publicProfiles: {}, attendeeRows: [], savedIds: [], blockedIds: [], locationShared: false,
+  events: [], publicProfiles: {}, attendeeRows: [], savedIds: [], blockedIds: [], notifications: [], locationShared: false,
   category: 'All', search: '', locationQuery: '', dateFilter: 'Any date', skillFilter: 'Any skill', budgetFilter: 'Any budget', sortBy: 'recommended',
   modal: null, editingId: null, location: null, locationGranted: false,
   adminProfiles: [], adminEvents: [], reports: [], busy: false, resetMode: false, resetStage: 'request',
 };
+let notificationChannel = null;
+let notificationChannelUserId = null;
 
 function esc(value = '') {
   return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+}
+function localDateISO(date = new Date()) {
+  return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
 }
 function applyTheme() {
   const dark = state.theme === 'dark' || (state.theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
   document.body.classList.toggle('dark', dark);
   localStorage.setItem('linkup-secure-theme', state.theme);
+  if (state.user?.id) localStorage.setItem(`linkup-secure-theme:${state.user.id}`, state.theme);
 }
 function toast(message, type = 'success') {
   toastRoot.innerHTML = `<div class="toast-wrap"><div class="toast ${type === 'error' ? 's-toast-error' : ''}" role="status">${esc(message)}</div></div>`;
@@ -29,10 +35,17 @@ function toast(message, type = 'success') {
 }
 function errorText(error) {
   const msg = error?.message || 'Something went wrong. Please try again.';
+  if (/notifications.*(does not exist|schema cache)|could not find the table .*notifications/i.test(msg)) return 'Hosted setup is incomplete. Run both Supabase migrations in filename order, then reload LINKUP.';
+  if (/failed to fetch|networkerror|load failed|fetch failed/i.test(msg)) return 'LINKUP cannot reach Supabase. Check that the project URL and publishable key are correct, that the Supabase project is active, and that this site URL is allowed in Supabase Auth settings.';
+  if (/email link is invalid|invalid.*(otp|token)|expired.*(otp|token|link)|token.*(expired|invalid)/i.test(msg)) return 'That recovery email is expired or already used. Request another recovery email and open the newest link.';
+  if (/email.*rate limit|rate limit.*email|too many.*email/i.test(msg)) return 'Too many recovery emails were requested. Wait a few minutes, then try again.';
+  if (/smtp|email provider|error sending.*email|failed to send.*email/i.test(msg)) return 'Supabase could not send the recovery email. Check Authentication → Emails and configure SMTP for delivery.';
   if (/invalid login credentials/i.test(msg)) return 'That email and password do not match. Check them and try again.';
   if (/already registered|already exists|email_exists|user exists/i.test(msg)) return 'This email already has an account. Sign in with it instead.';
   if (/email not confirmed/i.test(msg)) return 'Please confirm your email from the link we sent before signing in.';
   if (/password should be at least/i.test(msg)) return 'Use a longer password and try again.';
+  if (/maximum people cannot be lower than the current attendee count/i.test(msg)) return 'The maximum people count cannot be lower than the number already booked.';
+  if (/this event is unavailable/i.test(msg)) return 'This event is unavailable because of a block between the accounts.';
   if (/row-level security|permission denied/i.test(msg)) return 'This action is not allowed for this account. Refresh and try again.';
   return msg;
 }
@@ -55,12 +68,12 @@ function renderAuth(message = '') {
   const nameField = !state.resetMode && state.authMode === 'signup' ? `<div class="field"><label for="signup-name">Your name</label><input id="signup-name" name="name" autocomplete="name" minlength="2" maxlength="60" placeholder="e.g. Alex Novak" required value="${esc(state.user?.user_metadata?.display_name || '')}"></div>` : '';
   const emailField = `<div class="field"><label for="auth-email">Email address</label><input id="auth-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required value="${esc(state.lastEmail || '')}" ${recoveryCodeStep ? 'readonly' : ''}></div>`;
   const passwordField = !state.resetMode ? `<div class="field"><label for="auth-password">Password</label><div class="s-password-control"><input id="auth-password" name="password" type="password" autocomplete="${state.authMode === 'signup' ? 'new-password' : 'current-password'}" minlength="10" placeholder="At least 10 characters" required><button class="s-password-toggle" type="button" data-action="toggle-password" aria-label="Show password" title="Show password"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button></div></div>` : '';
-  const codeField = recoveryCodeStep ? `<div class="field"><label for="recovery-code">Email recovery code</label><input id="recovery-code" name="token" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,8}" maxlength="8" placeholder="Code from your email" required><small class="s-subtle">Enter the one-time code sent to this email address.</small></div>` : '';
+  const codeField = recoveryCodeStep ? `<div class="field"><label for="recovery-code">Email recovery code</label><input id="recovery-code" name="token" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6,8}" maxlength="8" placeholder="Code from your email" required><small class="s-subtle">If your email contains a code, enter it here. If it contains a secure reset link, open that link in this browser.</small></div>` : '';
   const actionLinks = !state.resetMode
     ? `<div class="s-auth-links"><button type="button" data-action="forgot-password">Forgot password?</button></div><div class="auth-switch">${state.authMode === 'signup' ? 'Already have an account?' : 'New to LINKUP?'} <button data-action="auth-switch">${state.authMode === 'signup' ? 'Sign in' : 'Create account'}</button></div>`
-    : `<div class="s-auth-links">${recoveryCodeStep ? `<button type="button" data-action="edit-recovery-email">Change email</button><button type="button" data-action="resend-recovery-code">Resend code</button>` : ''}<button type="button" data-action="cancel-reset">Back to sign in</button></div>`;
-  const body = `<form id="auth-form" class="auth-form">${nameField}${emailField}${passwordField}${codeField}${message ? `<div class="s-inline-note">${esc(message)}</div>` : ''}<button class="btn primary s-full" type="submit" data-submit>${state.resetMode ? recoveryCodeStep ? 'Verify code' : 'Send recovery code' : state.authMode === 'signup' ? 'Create account' : 'Sign in'}</button></form>${actionLinks}`;
-  authShell(body, state.resetMode ? 'Account recovery' : state.authMode === 'signup' ? 'Join your people' : 'Good to see you', state.resetMode ? recoveryCodeStep ? 'Enter your recovery code.' : 'Recover your account.' : state.authMode === 'signup' ? 'Your next plan starts here.' : 'Welcome back.', state.resetMode ? recoveryCodeStep ? 'Check your inbox for a one-time code. Verify it to choose a new password.' : 'Enter your email and we will send a one-time recovery code if an account matches.' : state.authMode === 'signup' ? 'Create your account, then tell us a little about what you like.' : 'Sign in to continue to your plans.');
+    : `<div class="s-auth-links">${recoveryCodeStep ? `<button type="button" data-action="edit-recovery-email">Change email</button><button type="button" data-action="resend-recovery-email">Resend email</button>` : ''}<button type="button" data-action="cancel-reset">Back to sign in</button></div>`;
+  const body = `<form id="auth-form" class="auth-form">${nameField}${emailField}${passwordField}${codeField}${message ? `<div class="s-inline-note">${esc(message)}</div>` : ''}<button class="btn primary s-full" type="submit" data-submit>${state.resetMode ? recoveryCodeStep ? 'Verify recovery code' : 'Send recovery email' : state.authMode === 'signup' ? 'Create account' : 'Sign in'}</button></form>${actionLinks}`;
+  authShell(body, state.resetMode ? 'Account recovery' : state.authMode === 'signup' ? 'Join your people' : 'Good to see you', state.resetMode ? recoveryCodeStep ? 'Check your email.' : 'Recover your account.' : state.authMode === 'signup' ? 'Your next plan starts here.' : 'Welcome back.', state.resetMode ? recoveryCodeStep ? 'Open the secure reset link from your email in this browser to choose a new password. If your email contains a code, enter it below.' : 'Enter your email and we will send a secure password recovery email if an account matches.' : state.authMode === 'signup' ? 'Create your account, then tell us a little about what you like.' : 'Sign in to continue to your plans.');
 }
 function renderCheckEmail(email) {
   const body = `<div class="s-check-mail"><div class="s-mail-icon">✉</div><h3>Check your inbox</h3><p>If <strong>${esc(email)}</strong> can be registered, we sent a confirmation link. If you already have an account, sign in with that address.</p><button class="btn primary s-full" data-action="back-signin">Back to sign in</button></div>`;
@@ -77,23 +90,29 @@ function normalizeProfile(row) {
 async function loadSession(session) {
   state.session = session;
   state.user = session?.user || null;
+  if (state.user) {
+    state.theme = localStorage.getItem(`linkup-secure-theme:${state.user.id}`) || 'system';
+  }
   state.profile = null;
   state.isAdmin = false;
   state.modal = null;
   if (!state.user) {
     state.authMode = 'signin';
+    state.notifications = [];
+    stopNotificationSubscription();
     renderAuth();
     return;
   }
   loading();
   try {
-    const [profileResult, genderResult, roleResult, savedResult, blockResult, locationResult] = await Promise.all([
+    const [profileResult, genderResult, roleResult, savedResult, blockResult, locationResult, notificationResult] = await Promise.all([
       supabase.from('profiles').select('*').eq('id', state.user.id).maybeSingle(),
       supabase.from('private_demographics').select('gender,self_described_gender').eq('user_id', state.user.id).maybeSingle(),
       supabase.from('user_roles').select('role').eq('user_id', state.user.id).maybeSingle(),
       supabase.from('saved_events').select('event_id').eq('user_id', state.user.id),
       supabase.from('user_blocks').select('blocked_id').eq('blocker_id', state.user.id),
       supabase.from('profile_locations').select('user_id').eq('user_id', state.user.id).maybeSingle(),
+      supabase.from('notifications').select('id,event_id,kind,title,body,created_at,read_at').eq('user_id', state.user.id).order('created_at', { ascending: false }).limit(50),
     ]);
     if (profileResult.error) throw profileResult.error;
     if (genderResult.error && genderResult.error.code !== 'PGRST116') throw genderResult.error;
@@ -106,27 +125,30 @@ async function loadSession(session) {
     state.blockedIds = (blockResult.data || []).map((row) => row.blocked_id);
     if (locationResult.error && locationResult.error.code !== 'PGRST116') throw locationResult.error;
     state.locationShared = Boolean(locationResult.data);
+    if (notificationResult.error) throw notificationResult.error;
+    state.notifications = notificationResult.data || [];
     if (!state.profile.profile_complete) {
       state.page = 'onboarding';
       renderOnboarding();
-      if (state.resetMode) renderPasswordUpdate();
+      if (state.resetMode && state.resetStage === 'password') renderPasswordUpdate();
       return;
     }
     await refreshData();
     applyTheme();
     renderApp();
-    if (state.resetMode) renderPasswordUpdate();
+    subscribeToNotifications(state.user.id);
+    if (state.resetMode && state.resetStage === 'password') renderPasswordUpdate();
   } catch (error) {
     app.innerHTML = `<main class="s-center"><div class="s-brand"><span class="brand-mark">↗</span> LINKUP</div><h2>We could not load your account.</h2><p>${esc(errorText(error))}</p><button class="btn secondary" data-action="reload">Try again</button><button class="btn outline" data-action="logout">Sign out</button></main>`;
   }
 }
 async function refreshData() {
-  const { data, error } = await supabase.from('events').select('*').eq('status', 'published').gte('event_date', new Date().toISOString().slice(0,10)).order('event_date').order('start_time');
+  const { data, error } = await supabase.from('events').select('*').eq('status', 'published').gte('event_date', localDateISO()).order('event_date').order('start_time');
   if (error) throw error;
   state.events = data || [];
   const ids = [...new Set(state.events.flatMap((event) => [event.host_id]))];
   if (ids.length) {
-    const result = await supabase.from('public_profiles').select('id,display_name,age,city,interests,activity_skills,availability').in('id', ids);
+    const result = await supabase.from('public_profiles').select('id,display_name,age,city,bio,interests,activity_skills,availability').in('id', ids);
     if (result.error) throw result.error;
     state.publicProfiles = Object.fromEntries((result.data || []).map((profile) => [profile.id, profile]));
   } else state.publicProfiles = {};
@@ -143,17 +165,43 @@ function renderOnboarding() {
   const profile = state.profile || normalizeProfile();
   const skills = profile.activity_skills || {};
   const genderOptions = [['prefer_not_to_say','Prefer not to say'],['woman','Woman'],['man','Man'],['non_binary','Non-binary'],['self_described','Self-describe']];
-  app.innerHTML = `<main class="s-onboard"><header class="s-onboard-head"><a class="s-brand" href="#"><span class="brand-mark">↗</span> LINKUP</a><button class="text-button" data-action="logout">Sign out</button></header><section class="s-onboard-card"><div class="eyebrow">Your account is ready · step 1 of 1</div><h1>Let’s set up your profile.</h1><p class="s-onboard-intro">We use these details to help match you with activities and people. Your gender and exact location stay private.</p><form id="profile-form"><div class="s-form-grid"><div class="field"><label for="profile-name">Name *</label><input id="profile-name" name="display_name" required minlength="2" maxlength="60" value="${esc(profile.display_name || state.user?.user_metadata?.display_name || '')}" autocomplete="name"></div><div class="field"><label for="profile-age">Age *</label><input id="profile-age" name="age" type="number" inputmode="numeric" min="16" max="110" required value="${esc(profile.age || '')}"><small>Used to suggest suitable age ranges.</small></div><div class="field"><label for="profile-gender">Sex / gender *</label><select id="profile-gender" name="gender" required><option value="" disabled ${state.gender ? '' : 'selected'}>Choose an option</option>${genderOptions.map(([value,label]) => `<option value="${value}" ${state.gender === value ? 'selected' : ''}>${label}</option>`).join('')}</select><small>Choose “Prefer not to say” if you don’t want to share. This is private to your account.</small></div><div class="field ${state.gender === 'self_described' ? '' : 's-hidden'}" id="self-gender-wrap"><label for="self-gender">How do you describe your gender?</label><input id="self-gender" name="self_described_gender" maxlength="40" value="${esc(state.selfGender)}"></div><div class="field s-form-wide"><label for="profile-city">Your city or area *</label><input id="profile-city" name="city" required minlength="2" maxlength="100" placeholder="e.g. Prague" value="${esc(profile.city || '')}" autocomplete="address-level2"><small>Only your city or area is shown to other members.</small></div><div class="field s-form-wide"><label>Location access <span class="s-optional">optional</span></label><div class="s-location-box"><div><strong>Use approximate location</strong><p>${state.locationGranted ? 'Location permission granted. Only a rounded, approximate point will be saved.' : 'Share a rough location to help find nearby plans. Your exact coordinates are discarded.'}</p></div><button type="button" class="btn secondary" data-action="request-location">${state.locationGranted ? 'Location allowed ✓' : 'Allow location'}</button></div><div class="s-location-status" aria-live="polite"></div></div><div class="field s-form-wide"><label>Activity skill levels *</label><p class="s-field-hint">Choose your level from 1 to 5 for each activity type.</p><div class="s-skill-grid">${categories.map((category) => `<label class="s-skill-row"><span>${categoryIcons[category]} ${esc(category)}</span><select name="skill_${esc(category)}" required>${[1,2,3,4,5].map((n) => `<option value="${n}" ${Number(skills[category] || 3) === n ? 'selected' : ''}>${n} · ${skillLabels[n - 1]}</option>`).join('')}</select></label>`).join('')}</div></div><div class="field s-form-wide"><label>Availability *</label><p class="s-field-hint">Choose every day you are usually available.</p><div class="s-day-grid">${weekdays.map(([value,label]) => `<label class="s-day"><input type="checkbox" name="availability" value="${value}" ${(profile.availability || []).includes(value) ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></div><div class="field s-form-wide"><label>Activities you enjoy <span class="s-optional">optional</span></label><div class="s-interest-grid">${categories.map((category) => `<label class="s-interest"><input type="checkbox" name="interests" value="${esc(category)}" ${(profile.interests || []).includes(category) ? 'checked' : ''}><span>${categoryIcons[category]} ${esc(category)}</span></label>`).join('')}</div></div></div><div class="s-onboard-actions"><span>Required: name, age, sex/gender choice, city, skills and at least one available day.</span><button type="submit" class="btn primary" data-submit>Save profile and continue →</button></div></form></section><p class="s-privacy-foot">You can change these details later in My profile. LINKUP never shows your email or precise location to other members.</p></main>`;
+  app.innerHTML = `<main class="s-onboard"><header class="s-onboard-head"><a class="s-brand" href="#"><span class="brand-mark">↗</span> LINKUP</a><button class="text-button" data-action="logout">Sign out</button></header><section class="s-onboard-card"><div class="eyebrow">Your account is ready · step 1 of 1</div><h1>Let’s set up your profile.</h1><p class="s-onboard-intro">We use these details to help match you with activities and people. Your gender and exact location stay private.</p><form id="profile-form"><div class="s-form-grid"><div class="field"><label for="profile-name">Name *</label><input id="profile-name" name="display_name" required minlength="2" maxlength="60" value="${esc(profile.display_name || state.user?.user_metadata?.display_name || '')}" autocomplete="name"></div><div class="field"><label for="profile-age">Age *</label><input id="profile-age" name="age" type="number" inputmode="numeric" min="16" max="110" required value="${esc(profile.age || '')}"><small>Used to suggest suitable age ranges.</small></div><div class="field"><label for="profile-gender">Sex / gender *</label><select id="profile-gender" name="gender" required><option value="" disabled ${state.gender ? '' : 'selected'}>Choose an option</option>${genderOptions.map(([value,label]) => `<option value="${value}" ${state.gender === value ? 'selected' : ''}>${label}</option>`).join('')}</select><small>Choose “Prefer not to say” if you don’t want to share. This is private to your account.</small></div><div class="field ${state.gender === 'self_described' ? '' : 's-hidden'}" id="self-gender-wrap"><label for="self-gender">How do you describe your gender?</label><input id="self-gender" name="self_described_gender" maxlength="40" value="${esc(state.selfGender)}"></div><div class="field s-form-wide"><label for="profile-city">Your city or area *</label><input id="profile-city" name="city" required minlength="2" maxlength="100" placeholder="e.g. Prague" value="${esc(profile.city || '')}" autocomplete="address-level2"><small>Only your city or area is shown to other members.</small></div><div class="field s-form-wide"><label for="profile-bio">Short bio <span class="s-optional">optional</span></label><textarea id="profile-bio" name="bio" maxlength="500" rows="3" placeholder="What do you enjoy doing?">${esc(profile.bio || "")}</textarea><small>A few words to help other members get to know you.</small></div><div class="field s-form-wide"><label>Location access <span class="s-optional">optional</span></label><div class="s-location-box"><div><strong>Use approximate location</strong><p>${state.locationGranted ? 'Location permission granted. Only a rounded, approximate point will be saved.' : 'Share a rough location to help find nearby plans. Your exact coordinates are discarded.'}</p></div><button type="button" class="btn secondary" data-action="request-location">${state.locationGranted ? 'Location allowed ✓' : 'Allow location'}</button></div><div class="s-location-status" aria-live="polite"></div></div><div class="field s-form-wide"><label>Activity skill levels *</label><p class="s-field-hint">Choose your level from 1 to 5 for each activity type.</p><div class="s-skill-grid">${categories.map((category) => `<label class="s-skill-row"><span>${categoryIcons[category]} ${esc(category)}</span><select name="skill_${esc(category)}" required>${[1,2,3,4,5].map((n) => `<option value="${n}" ${Number(skills[category] || 3) === n ? 'selected' : ''}>${n} · ${skillLabels[n - 1]}</option>`).join('')}</select></label>`).join('')}</div></div><div class="field s-form-wide"><label>Availability *</label><p class="s-field-hint">Choose every day you are usually available.</p><div class="s-day-grid">${weekdays.map(([value,label]) => `<label class="s-day"><input type="checkbox" name="availability" value="${value}" ${(profile.availability || []).includes(value) ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></div><div class="field s-form-wide"><label>Activities you enjoy <span class="s-optional">optional</span></label><div class="s-interest-grid">${categories.map((category) => `<label class="s-interest"><input type="checkbox" name="interests" value="${esc(category)}" ${(profile.interests || []).includes(category) ? 'checked' : ''}><span>${categoryIcons[category]} ${esc(category)}</span></label>`).join('')}</div></div></div><div class="s-onboard-actions"><span>Required: name, age, sex/gender choice, city, skills and at least one available day.</span><button type="submit" class="btn primary" data-submit>Save profile and continue →</button></div></form></section><p class="s-privacy-foot">You can change these details later in My profile. LINKUP never shows your email or precise location to other members.</p></main>`;
+  const ageInput = document.getElementById('profile-age');
+  const ageHint = ageInput?.nextElementSibling;
+  if (ageHint?.tagName === 'SMALL') ageHint.id = 'profile-age-note';
+  const ageError = document.createElement('small');
+  ageError.id = 'profile-age-error';
+  ageError.className = 's-age-error';
+  ageError.setAttribute('aria-live', 'polite');
+  ageError.hidden = true;
+  ageHint?.insertAdjacentElement('afterend', ageError);
+  ageInput?.setAttribute('aria-describedby', 'profile-age-note profile-age-error');
+  updateAgeValidation(ageInput);
   applyTheme();
+}
+function updateAgeValidation(input = document.getElementById('profile-age')) {
+  if (!input) return true;
+  const age = input.value === '' ? null : Number(input.value);
+  const message = age !== null && age < 16
+    ? "You're not old enough to use LINKUP. You must be at least 16."
+    : '';
+  input.setCustomValidity(message);
+  const error = document.getElementById('profile-age-error');
+  if (error) {
+    error.textContent = message;
+    error.hidden = !message;
+  }
+  return !message;
 }
 function profileCard(profile) {
   if (!profile) return 'LINKUP member';
-  return `${esc(profile.display_name)}${profile.age ? `, ${esc(profile.age)}` : ''}`;
+  const publicName = String(profile.display_name || '').trim().split(/\s+/)[0] || 'LINKUP member';
+  return `${esc(publicName)}${profile.age ? `, ${esc(profile.age)}` : ''}`;
 }
 function pageTitle() {
-  return ({ discover: 'Discover', dashboard: 'My activity', saved: 'Saved events', profile: 'My profile', settings: 'Settings', help: 'Help & safety', admin: 'Admin dashboard' })[state.page] || 'Discover';
+  return ({ discover: 'Discover', dashboard: 'My activity', saved: 'Saved events', notifications: 'Notifications', profile: 'My profile', settings: 'Settings', help: 'Help & safety', admin: 'Admin dashboard' })[state.page] || 'Discover';
 }
-const nav = [['discover','⌕','Discover'],['dashboard','▦','My activity'],['saved','♡','Saved events'],['profile','◉','My profile'],['settings','⚙','Preferences']];
+const nav = [['discover','⌕','Discover'],['dashboard','▦','My activity'],['saved','♡','Saved events'],['notifications','♧','Notifications'],['profile','◉','My profile'],['settings','⚙','Preferences']];
 function renderApp() {
   if (!state.profile?.profile_complete) return renderOnboarding();
   const links = nav.map(([key, icon, label]) => `<button class="s-nav-item ${state.page === key ? 'active' : ''}" data-page="${key}"><span>${icon}</span>${label}</button>`).join('');
@@ -163,6 +211,7 @@ function renderApp() {
 function pageContent() {
   if (state.page === 'dashboard') return dashboardPage();
   if (state.page === 'saved') return savedPage();
+  if (state.page === 'notifications') return notificationsPage();
   if (state.page === 'profile') return profilePage();
   if (state.page === 'settings') return settingsPage();
   if (state.page === 'help') return helpPage();
@@ -171,9 +220,9 @@ function pageContent() {
   return discoverPage();
 }
 function filteredEvents() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateISO();
   const week = new Date(); week.setDate(week.getDate() + 6);
-  const weekEnd = week.toISOString().slice(0, 10);
+  const weekEnd = localDateISO(week);
   const rows = state.events.filter((event) => {
     if (state.blockedIds.includes(event.host_id)) return false;
     const phrase = `${event.title} ${event.category} ${event.city} ${event.public_place} ${event.description}`.toLowerCase();
@@ -225,7 +274,7 @@ function eventGrid(events) {
 }
 function discoverPage() {
   const today = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
-  const todayISO = new Date().toISOString().slice(0,10);
+  const todayISO = localDateISO();
   const todayCount = filteredEvents().filter((event) => event.event_date === todayISO).length;
   const recommended = recommendedEvents();
   const suggested = recommended[0];
@@ -241,10 +290,95 @@ function dashboardPage() {
 function savedPage() {
   return `<div class="s-page-head"><div><div class="eyebrow">For later</div><h1>Saved events</h1><p>Good plans worth keeping close.</p></div></div>${eventGrid(state.events.filter((event) => state.savedIds.includes(event.id)))}`;
 }
+async function loadNotifications() {
+  const { data, error } = await supabase.from('notifications')
+    .select('id,event_id,kind,title,body,created_at,read_at')
+    .eq('user_id', state.user.id)
+    .order('created_at', { ascending: false })
+    .limit(50);
+  if (error) throw error;
+  state.notifications = data || [];
+}
+function stopNotificationSubscription() {
+  if (notificationChannel) void supabase.removeChannel(notificationChannel);
+  notificationChannel = null;
+  notificationChannelUserId = null;
+}
+function subscribeToNotifications(userId) {
+  if (notificationChannelUserId === userId) return;
+  stopNotificationSubscription();
+  notificationChannelUserId = userId;
+  notificationChannel = supabase.channel(`linkup-notifications-${userId}`)
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'notifications',
+      filter: `user_id=eq.${userId}`,
+    }, ({ new: notification }) => {
+      if (!notification?.id || notification.user_id !== state.user?.id) return;
+      state.notifications = [notification, ...state.notifications.filter((item) => item.id !== notification.id)].slice(0, 50);
+      toast('You have a new LINKUP update.');
+      if (state.page === 'notifications') renderApp();
+    })
+    .subscribe();
+}
+async function markNotificationRead(id = null) {
+  const readAt = new Date().toISOString();
+  let query = supabase.from('notifications').update({ read_at: readAt }).eq('user_id', state.user.id).is('read_at', null);
+  if (id) query = query.eq('id', id);
+  const { error } = await query;
+  if (error) throw error;
+  state.notifications = state.notifications.map((notification) => (
+    !id || notification.id === id ? { ...notification, read_at: readAt } : notification
+  ));
+}
+async function openNotificationEvent(eventId, notificationId) {
+  try {
+    await markNotificationRead(notificationId);
+    let event = state.events.find((row) => row.id === eventId);
+    if (!event) {
+      const result = await supabase.from('events').select('*').eq('id', eventId).eq('status', 'published').maybeSingle();
+      if (result.error) throw result.error;
+      event = result.data;
+      if (event) state.events.push(event);
+    }
+    if (!event) {
+      toast('This event is no longer available.', 'error');
+      renderApp();
+      return;
+    }
+    state.modal = `event:${eventId}`;
+    renderApp();
+  } catch (error) {
+    toast(errorText(error), 'error');
+  }
+}
+function notificationsPage() {
+  const unread = state.notifications.filter((notification) => !notification.read_at).length;
+  const rows = state.notifications.map((notification) => `
+    <article class="s-notification ${notification.read_at ? 'is-read' : 'is-unread'}">
+      <div class="s-notification-mark">${notification.kind === 'event_joined' ? '＋' : notification.kind === 'event_updated' ? '↻' : '!'}</div>
+      <div class="s-notification-copy">
+        <strong>${esc(notification.title)}</strong>
+        <p>${esc(notification.body)}</p>
+        <time datetime="${esc(notification.created_at)}">${esc(new Date(notification.created_at).toLocaleString())}</time>
+        ${notification.event_id ? `<button class="text-button" data-action="notification-event" data-id="${esc(notification.event_id)}" data-notification="${esc(notification.id)}">Open event →</button>` : ''}
+      </div>
+      ${notification.read_at ? '<span class="s-read-label">Read</span>' : `<button class="text-button" data-action="mark-notification" data-id="${esc(notification.id)}">Mark read</button>`}
+    </article>`).join('');
+  return `
+    <div class="s-page-head">
+      <div><div class="eyebrow">Your LINKUP updates</div><h1>Notifications</h1><p>Event bookings and changes from your plans.</p></div>
+      <button class="btn outline" data-action="mark-all-notifications" ${unread ? '' : 'disabled'}>Mark all read${unread ? ` · ${unread}` : ''}</button>
+    </div>
+    <section class="panel s-notifications-panel">
+      ${rows || '<div class="s-empty-notifications"><strong>You’re all caught up.</strong><p>Updates about your events will appear here.</p></div>'}
+    </section>`;
+}
 function profilePage() {
   const days = (state.profile.availability || []).map((day) => day[0].toUpperCase() + day.slice(1)).join(', ');
   const skillChips = categories.map((category) => `<span class="s-chip">${categoryIcons[category]} ${esc(category)} · ${Number(state.profile.activity_skills?.[category] || 1)}/5</span>`).join('');
-  return `<div class="s-page-head"><div><div class="eyebrow">The person behind the plans</div><h1>My profile</h1><p>Your details help LINKUP recommend activities that fit.</p></div><button class="btn primary" data-action="edit-profile">Edit profile</button></div><section class="s-profile-banner"><div class="s-profile-avatar">${esc(state.profile.display_name.slice(0,1).toUpperCase())}</div><div><h2>${esc(state.profile.display_name)}, ${state.profile.age}</h2><p>⌖ ${esc(state.profile.city)}</p></div></section><div class="s-two-col"><section class="panel"><div class="panel-head"><h2 class="panel-title">Activity skills</h2></div><div class="s-interest-grid">${skillChips}</div><div class="section-head"><h3>Your interests</h3></div><div class="s-interest-grid">${(state.profile.interests || []).map((category) => `<span class="s-chip">${categoryIcons[category] || '✨'} ${esc(category)}</span>`).join('') || '<span class="s-subtle">No interests selected yet.</span>'}</div></section><section class="panel"><div class="panel-head"><h2 class="panel-title">Profile details</h2></div>${[['Email',state.user.email],['Age',state.profile.age],['City or area',state.profile.city],['Usually available',days || 'Not set'],['Gender','Private to you']].map(([label,value]) => `<div class="s-detail-row"><strong>${label}</strong><span>${esc(value)}</span></div>`).join('')}<p class="s-privacy-note">Your email, gender and exact coordinates are private. Your public profile shares your first name, age, city and activity details.</p></section></div>`;
+  return `<div class="s-page-head"><div><div class="eyebrow">The person behind the plans</div><h1>My profile</h1><p>Your details help LINKUP recommend activities that fit.</p></div><button class="btn primary" data-action="edit-profile">Edit profile</button></div><section class="s-profile-banner"><div class="s-profile-avatar">${esc(state.profile.display_name.slice(0,1).toUpperCase())}</div><div><h2>${esc(state.profile.display_name)}, ${state.profile.age}</h2><p>⌖ ${esc(state.profile.city)}</p><p class="s-profile-bio">${esc(state.profile.bio || "Add a short bio about the activities you enjoy.")}</p></div></section><div class="s-two-col"><section class="panel"><div class="panel-head"><h2 class="panel-title">Activity skills</h2></div><div class="s-interest-grid">${skillChips}</div><div class="section-head"><h3>Your interests</h3></div><div class="s-interest-grid">${(state.profile.interests || []).map((category) => `<span class="s-chip">${categoryIcons[category] || '✨'} ${esc(category)}</span>`).join('') || '<span class="s-subtle">No interests selected yet.</span>'}</div></section><section class="panel"><div class="panel-head"><h2 class="panel-title">Profile details</h2></div>${[['Email',state.user.email],['Age',state.profile.age],['City or area',state.profile.city],['Usually available',days || 'Not set'],['Gender','Private to you']].map(([label,value]) => `<div class="s-detail-row"><strong>${label}</strong><span>${esc(value)}</span></div>`).join('')}<p class="s-privacy-note">Your email, gender and exact coordinates are private. Your public profile shares your first name, age, city, bio and activity details.</p></section></div>`;
 }
 function settingsPage() {
   return `<div class="s-page-head"><div><div class="eyebrow">Make it yours</div><h1>Preferences</h1><p>Choose how LINKUP looks on this device.</p></div></div><div class="s-two-col"><section class="panel"><div class="panel-head"><h2 class="panel-title">Appearance</h2></div><div class="s-theme-buttons">${[['light','☀ Light'],['dark','☾ Dark'],['system','◐ System']].map(([value,label]) => `<button class="category ${state.theme === value ? 'active' : ''}" data-theme="${value}">${label}</button>`).join('')}</div><p class="s-subtle">Your theme choice is stored in this browser.</p></section><section class="panel"><div class="panel-head"><h2 class="panel-title">Account</h2></div><p>${esc(state.user.email)}</p><p class="s-subtle">Approximate location sharing: ${state.locationShared ? 'on' : 'off'}.</p>${state.locationShared ? `<button class="btn outline small" data-action="remove-location">Remove saved approximate location</button>` : ''}<p class="s-privacy-note">You can share location again from your profile setup. LINKUP stores only the rounded area you approved.</p><button class="btn outline" data-action="logout">Sign out</button></section></div>`;
@@ -271,7 +405,7 @@ function renderModal() {
   if (!state.modal) { modalRoot.innerHTML = ''; return; }
   if (state.modal === 'event-form') {
     const event = state.editingId ? state.events.find((item) => item.id === state.editingId) : null;
-    modalRoot.innerHTML = `<div class="modal-backdrop" data-close><section class="modal wide s-modal" role="dialog" aria-modal="true"><header class="modal-header"><div><div class="eyebrow">Bring people together</div><h2>${event ? 'Edit your plan' : 'Create an event'}</h2><p>Choose a public place and give people the details they need.</p></div><button class="close-btn" data-action="close">×</button></header><form id="event-form"><div class="form-grid"><div class="field"><label>Activity or event name *</label><input name="title" required minlength="3" maxlength="100" value="${esc(event?.title || '')}" placeholder="e.g. Sunset badminton"></div><div class="field"><label>Category *</label><select name="category" required>${categories.map((category) => `<option ${event?.category === category ? 'selected' : ''}>${esc(category)}</option>`).join('')}</select></div><div class="field"><label>Date *</label><input name="event_date" type="date" min="${new Date().toISOString().slice(0,10)}" required value="${esc(event?.event_date || '')}"></div><div class="field"><label>Start time *</label><input name="start_time" type="time" required value="${esc(String(event?.start_time || '').slice(0,5))}"></div><div class="field"><label>City or area *</label><input name="city" required minlength="2" maxlength="100" value="${esc(event?.city || state.profile.city)}"></div><div class="field"><label>Public meeting place *</label><input name="public_place" required minlength="2" maxlength="180" placeholder="e.g. Letná Park entrance" value="${esc(event?.public_place || '')}"></div><div class="field"><label>Skill level</label><select name="skill_level"><option value="">All levels</option>${[1,2,3,4,5].map((n) => `<option value="${n}" ${Number(event?.skill_level) === n ? 'selected' : ''}>${n} · ${skillLabels[n - 1]}</option>`).join('')}</select></div><div class="field"><label>Budget</label><input name="budget" maxlength="80" placeholder="Free / under 200 Kč" value="${esc(event?.budget || 'Free')}"></div><div class="field"><label>Maximum people *</label><input name="capacity" type="number" min="2" max="50" required value="${event?.capacity || 4}"></div><div class="field"><label>Age range</label><input name="age_range" maxlength="40" value="${esc(event?.age_range || 'Any age')}" placeholder="Any age"></div><div class="field s-form-wide"><label>Description</label><textarea name="description" maxlength="2000" placeholder="What should people expect?">${esc(event?.description || '')}</textarea></div></div><p class="form-note">Meet in a public place. Keep private addresses and exact home locations off your event.</p><div class="modal-actions"><button type="button" class="btn secondary" data-action="close">Cancel</button><button class="btn primary" type="submit" data-submit>${event ? 'Save changes' : 'Publish event →'}</button></div></form></section></div>`;
+    modalRoot.innerHTML = `<div class="modal-backdrop" data-close><section class="modal wide s-modal" role="dialog" aria-modal="true"><header class="modal-header"><div><div class="eyebrow">Bring people together</div><h2>${event ? 'Edit your plan' : 'Create an event'}</h2><p>Choose a public place and give people the details they need.</p></div><button class="close-btn" data-action="close">×</button></header><form id="event-form"><div class="form-grid"><div class="field"><label>Activity or event name *</label><input name="title" required minlength="3" maxlength="100" value="${esc(event?.title || '')}" placeholder="e.g. Sunset badminton"></div><div class="field"><label>Category *</label><select name="category" required>${categories.map((category) => `<option ${event?.category === category ? 'selected' : ''}>${esc(category)}</option>`).join('')}</select></div><div class="field"><label>Date *</label><input name="event_date" type="date" min="${localDateISO()}" required value="${esc(event?.event_date || '')}"></div><div class="field"><label>Start time *</label><input name="start_time" type="time" required value="${esc(String(event?.start_time || '').slice(0,5))}"></div><div class="field"><label>City or area *</label><input name="city" required minlength="2" maxlength="100" value="${esc(event?.city || state.profile.city)}"></div><div class="field"><label>Public meeting place *</label><input name="public_place" required minlength="2" maxlength="180" placeholder="e.g. Letná Park entrance" value="${esc(event?.public_place || '')}"></div><div class="field"><label>Skill level</label><select name="skill_level"><option value="">All levels</option>${[1,2,3,4,5].map((n) => `<option value="${n}" ${Number(event?.skill_level) === n ? 'selected' : ''}>${n} · ${skillLabels[n - 1]}</option>`).join('')}</select></div><div class="field"><label>Budget</label><input name="budget" maxlength="80" placeholder="Free / under 200 Kč" value="${esc(event?.budget || 'Free')}"></div><div class="field"><label>Maximum people *</label><input name="capacity" type="number" min="2" max="50" required value="${event?.capacity || 4}"></div><div class="field"><label>Age range</label><input name="age_range" maxlength="40" value="${esc(event?.age_range || 'Any age')}" placeholder="Any age"></div><div class="field s-form-wide"><label>Description</label><textarea name="description" maxlength="2000" placeholder="What should people expect?">${esc(event?.description || '')}</textarea></div></div><p class="form-note">Meet in a public place. Keep private addresses and exact home locations off your event.</p><div class="modal-actions"><button type="button" class="btn secondary" data-action="close">Cancel</button><button class="btn primary" type="submit" data-submit>${event ? 'Save changes' : 'Publish event →'}</button></div></form></section></div>`;
     return;
   }
   if (state.modal.startsWith('event:')) { renderEventDetail(state.modal.slice(6)); return; }
@@ -286,7 +420,7 @@ async function renderEventDetail(id) {
   const attendees = await supabase.from('event_attendees').select('user_id').eq('event_id', event.id);
   if (attendees.error) { toast(errorText(attendees.error), 'error'); return; }
   const attendeeIdsFromDb = (attendees.data || []).map((row) => row.user_id);
-  const profiles = await supabase.from('public_profiles').select('id,display_name,age,city,activity_skills').in('id', [...new Set([event.host_id, ...attendeeIdsFromDb])]);
+  const profiles = await supabase.from('public_profiles').select('id,display_name,age,city,bio,activity_skills').in('id', [...new Set([event.host_id, ...attendeeIdsFromDb])]);
   if (profiles.error) { toast(errorText(profiles.error), 'error'); return; }
   const allProfiles = Object.fromEntries((profiles.data || []).map((profile) => [profile.id, profile]));
   const attendeeIds = [...new Set([event.host_id, ...(attendees.data || []).map((row) => row.user_id)])];
@@ -294,7 +428,7 @@ async function renderEventDetail(id) {
   const isGoing = attendeeIds.includes(state.user.id);
   const count = attendeeIds.length;
   const date = new Date(`${event.event_date}T${event.start_time}`).toLocaleString(undefined, { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-  const rows = attendeeIds.map((userId) => `<div class="attendee-row"><div class="s-avatar">${esc((allProfiles[userId]?.display_name || 'L').slice(0,1).toUpperCase())}</div><div><strong>${profileCard(allProfiles[userId])}${userId === state.user.id ? ' · You' : ''}</strong><span>${userId === event.host_id ? 'Host' : 'Going'} · ${esc(allProfiles[userId]?.city || '')}</span></div></div>`).join('');
+  const rows = attendeeIds.map((userId) => `<div class="attendee-row"><div class="s-avatar">${esc((allProfiles[userId]?.display_name || 'L').slice(0,1).toUpperCase())}</div><div><strong>${profileCard(allProfiles[userId])}${userId === state.user.id ? ' · You' : ''}</strong><span>${userId === event.host_id ? 'Host' : 'Going'} · ${esc(allProfiles[userId]?.city || '')}</span>${allProfiles[userId]?.bio ? `<p class="s-attendee-bio">${esc(allProfiles[userId].bio)}</p>` : ''}</div></div>`).join('');
   modalRoot.innerHTML = `<div class="modal-backdrop" data-close><section class="modal s-modal" role="dialog" aria-modal="true"><header class="modal-header"><div><div class="eyebrow">${categoryIcons[event.category] || '✨'} ${esc(event.category)}</div><h2>${esc(event.title)}</h2><p>Hosted by ${profileCard(allProfiles[event.host_id])}</p></div><button class="close-btn" data-action="close">×</button></header><div class="s-event-detail"><p><strong>When</strong><span>${esc(date)}</span></p><p><strong>Where</strong><span>${esc(event.public_place)}, ${esc(event.city)}</span></p><p><strong>Skill level</strong><span>${event.skill_level ? `${event.skill_level}/5` : 'All levels'}</span></p><p><strong>Budget</strong><span>${esc(event.budget)}</span></p><p><strong>People</strong><span>${count} of ${event.capacity} · ${Math.max(0,event.capacity - count)} spots left</span></p></div>${event.description ? `<p class="s-event-description">${esc(event.description)}</p>` : ''}<div class="eyebrow">Attendees</div>${rows}<div class="s-detail-actions">${!isHost ? `<button class="text-button" data-action="report-event" data-id="${event.id}">Report</button><button class="text-button" data-action="block-host" data-id="${event.host_id}">Block host</button>` : `<button class="btn outline" data-action="edit-event" data-id="${event.id}">Edit plan</button><button class="btn danger" data-action="delete-event" data-id="${event.id}">Delete</button>`}${isHost ? '' : isGoing ? `<button class="btn outline" data-action="leave-event" data-id="${event.id}">Leave event</button>` : `<button class="btn primary" data-action="join-event" data-id="${event.id}" ${count >= event.capacity ? 'disabled' : ''}>${count >= event.capacity ? 'Event is full' : 'Join this event →'}</button>`}</div><p class="legal-note">Choose public meeting places. LINKUP never shares precise private addresses.</p></section></div>`;
 }
 function renderPasswordUpdate() {
@@ -305,14 +439,14 @@ function renderPasswordUpdate() {
 function changePage(page) {
   state.page = page;
   state.modal = null;
-  const task = page === 'admin' ? loadAdmin() : refreshData();
+  const task = page === 'admin' ? loadAdmin() : page === 'notifications' ? loadNotifications() : refreshData();
   Promise.resolve(task).then(renderApp).catch((error) => toast(errorText(error), 'error'));
 }
 async function submitAuth(form) {
   const fields = new FormData(form);
   const email = String(fields.get('email') || '').trim().toLowerCase();
   state.lastEmail = email;
-  if (state.resetMode && state.resetStage === 'request') { await sendRecoveryCode(email); return; }
+  if (state.resetMode && state.resetStage === 'request') { await sendRecoveryEmail(email); return; }
   setBusy(true);
   try {
     if (state.resetMode) {
@@ -343,7 +477,7 @@ async function submitAuth(form) {
     toast(errorText(error), 'error');
   } finally { setBusy(false); }
 }
-async function sendRecoveryCode(email = state.lastEmail) {
+async function sendRecoveryEmail(email = state.lastEmail) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail) { toast('Enter your email address first.', 'error'); return; }
   state.lastEmail = normalizedEmail;
@@ -353,7 +487,7 @@ async function sendRecoveryCode(email = state.lastEmail) {
     if (error) throw error;
     state.resetMode = true;
     state.resetStage = 'code';
-    renderAuth(`If an account exists for ${normalizedEmail}, a recovery code was sent.`);
+    renderAuth(`If an account exists for ${normalizedEmail}, a password recovery email was sent. Open its secure link in this browser, or enter the code if your email contains one.`);
   } catch (error) { toast(errorText(error), 'error'); }
   finally { setBusy(false); }
 }
@@ -376,6 +510,15 @@ function getLocation() {
 }
 async function submitProfile(form) {
   const fields = new FormData(form);
+  const ageValue = String(fields.get('age') || '');
+  const age = Number(ageValue);
+  if (!Number.isInteger(age) || age < 16) {
+    const ageInput = document.getElementById('profile-age');
+    updateAgeValidation(ageInput);
+    ageInput?.focus();
+    ageInput?.reportValidity();
+    return;
+  }
   const availability = fields.getAll('availability');
   if (!availability.length) { toast('Choose at least one day you are usually available.', 'error'); return; }
   const gender = String(fields.get('gender') || 'prefer_not_to_say');
@@ -386,9 +529,9 @@ async function submitProfile(form) {
   const profile = {
     id: state.user.id,
     display_name: String(fields.get('display_name') || '').trim(),
-    age: Number(fields.get('age')),
+    age,
     city: String(fields.get('city') || '').trim(),
-    bio: state.profile?.bio || '',
+    bio: String(fields.get('bio') || '').trim(),
     interests: fields.getAll('interests'),
     activity_skills: skills,
     availability,
@@ -438,6 +581,11 @@ function eventPayload(fields) {
 }
 async function submitEvent(form) {
   const payload = eventPayload(new FormData(form));
+  const startsAt = new Date(`${payload.event_date}T${payload.start_time}`);
+  if (!Number.isFinite(startsAt.getTime()) || startsAt <= new Date()) {
+    toast('Choose a future date and time for your event.', 'error');
+    return;
+  }
   setBusy(true);
   try {
     const result = state.editingId
@@ -520,6 +668,7 @@ async function adminDeleteEvent(id) {
   } catch (error) { toast(errorText(error), 'error'); }
 }
 async function signOut() {
+  stopNotificationSubscription();
   const { error } = await supabase.auth.signOut();
   if (error) toast(errorText(error), 'error');
   state.session = null; state.user = null; state.profile = null; state.isAdmin = false;
@@ -542,6 +691,7 @@ async function updatePassword(form) {
     const { error } = await supabase.auth.updateUser({ password });
     if (error) throw error;
     state.resetMode = false; state.resetStage = 'request'; modalRoot.innerHTML = '';
+    history.replaceState(null, document.title, `${location.pathname}${location.search}`);
     await loadSession(state.session);
     toast('Your password has been updated.');
   } catch (error) { toast(errorText(error), 'error'); }
@@ -575,10 +725,13 @@ document.addEventListener('click', async (event) => {
     }
     case 'auth-switch': state.authMode = state.authMode === 'signup' ? 'signin' : 'signup'; renderAuth(); break;
     case 'forgot-password': state.lastEmail = document.getElementById('auth-email')?.value?.trim() || state.lastEmail; state.resetMode = true; state.resetStage = 'request'; renderAuth(); break;
-    case 'resend-recovery-code': await sendRecoveryCode(state.lastEmail); break;
+    case 'resend-recovery-email': await sendRecoveryEmail(state.lastEmail); break;
     case 'edit-recovery-email': state.resetStage = 'request'; renderAuth(); break;
     case 'cancel-reset': state.authMode = 'signin'; state.resetMode = false; state.resetStage = 'request'; renderAuth(); break;
     case 'back-signin': state.authMode = 'signin'; state.resetMode = false; state.resetStage = 'request'; renderAuth(); break;
+    case 'mark-notification': try { await markNotificationRead(id); renderApp(); } catch (error) { toast(errorText(error), 'error'); } break;
+    case 'mark-all-notifications': try { await markNotificationRead(); renderApp(); } catch (error) { toast(errorText(error), 'error'); } break;
+    case 'notification-event': await openNotificationEvent(id, button.dataset.notification); break;
     case 'logout': await signOut(); break;
     case 'reload': await loadSession(state.session); break;
     case 'request-location': getLocation(); break;
@@ -608,6 +761,7 @@ document.addEventListener('submit', async (event) => {
   if (event.target.id === 'password-update-form') { event.preventDefault(); await updatePassword(event.target); }
 });
 document.addEventListener('input', (event) => {
+  if (event.target.id === 'profile-age') updateAgeValidation(event.target);
   if (event.target.id === 'event-search' || event.target.id === 'location-search') {
     if (event.target.id === 'event-search') state.search = event.target.value;
     else state.locationQuery = event.target.value;
@@ -633,11 +787,13 @@ document.addEventListener('change', (event) => {
 applyTheme();
 supabase.auth.onAuthStateChange((event, session) => {
   if (event === 'PASSWORD_RECOVERY') { state.resetMode = true; state.resetStage = 'password'; if (session?.user) { state.session = session; state.user = session.user; if (state.profile) renderPasswordUpdate(); } return; }
-  if (event === 'SIGNED_OUT') { state.session = null; state.user = null; state.profile = null; state.isAdmin = false; renderAuth(); return; }
+  if (event === 'SIGNED_OUT') { stopNotificationSubscription(); state.session = null; state.user = null; state.profile = null; state.isAdmin = false; state.notifications = []; renderAuth(); return; }
   if (event === 'USER_UPDATED') {
     queueMicrotask(() => { if (session?.user?.id !== state.user?.id) void loadSession(session); });
   }
 });
 const { data: { session } } = await supabase.auth.getSession();
-if (session && new URLSearchParams(location.hash.slice(1)).get('type') === 'recovery') { state.resetMode = true; state.resetStage = 'password'; }
+const hashParams = new URLSearchParams(location.hash.slice(1));
+const queryParams = new URLSearchParams(location.search);
+if (session && (hashParams.get('type') === 'recovery' || queryParams.get('type') === 'recovery')) { state.resetMode = true; state.resetStage = 'password'; }
 await loadSession(session);
